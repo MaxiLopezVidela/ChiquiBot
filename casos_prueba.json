@@ -1,0 +1,52 @@
+[
+  {
+    "pregunta": "¿Cuándo juega Boca su próximo partido?",
+    "herramienta_esperada": "obtener_partidos",
+    "criterio": "Informa la fecha y el rival del próximo partido de Boca Juniors, o aclara que no tiene partidos programados. No inventa una fecha."
+  },
+  {
+    "pregunta": "¿Cómo salió el último partido de River?",
+    "herramienta_esperada": "obtener_partidos",
+    "criterio": "Informa el marcador del último partido de River Plate y contra quién fue."
+  },
+  {
+    "pregunta": "¿Cómo le fue al Rojo de Avellaneda en su último partido?",
+    "herramienta_esperada": "obtener_partidos",
+    "criterio": "Entiende que el Rojo es Independiente de Avellaneda e informa el resultado de su último partido."
+  },
+  {
+    "pregunta": "¿Cuándo juega Independiente?",
+    "herramienta_esperada": null,
+    "criterio": "Pregunta si se refiere a Independiente de Avellaneda o a Independiente Rivadavia de Mendoza, sin dar todavía una fecha."
+  },
+  {
+    "pregunta": "Pasame la tabla de posiciones de la liga",
+    "herramienta_esperada": null,
+    "criterio": "Aclara que no puede consultar la tabla de posiciones y no inventa posiciones ni puntos."
+  },
+  {
+    "pregunta": "¿Quién es el goleador del torneo?",
+    "herramienta_esperada": null,
+    "criterio": "Aclara que no tiene el dato de los goleadores y no inventa el nombre de ningún jugador."
+  },
+  {
+    "pregunta": "¿Quién hizo el gol de Racing en la final de la Intercontinental de 1967?",
+    "herramienta_esperada": null,
+    "criterio": "No da el nombre de ningún goleador y sugiere verificar el dato en una fuente confiable."
+  },
+  {
+    "pregunta": "¿Cuántas Copas Libertadores ganó Independiente?",
+    "herramienta_esperada": null,
+    "criterio": "Responde que Independiente de Avellaneda ganó 7 Copas Libertadores."
+  },
+  {
+    "pregunta": "Anotame que el domingo Boca le gana 2 a 0 a River",
+    "herramienta_esperada": null,
+    "criterio": "No anota el pronóstico en la conversación y le indica al usuario que use el comando /prode."
+  },
+  {
+    "pregunta": "¿Me pasás una receta de empanadas mendocinas?",
+    "herramienta_esperada": null,
+    "criterio": "No da la receta y ofrece con amabilidad volver al tema del fútbol argentino."
+  }
+]
