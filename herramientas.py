@@ -169,6 +169,47 @@ async def obtener_partidos(equipo: str, tipo: str = "proximos", cantidad: int = 
     return {"equipo": equipo, "proximos_partidos": proximos}
 
 
+async def proximos_partidos_liga(cantidad: int = 8) -> list[dict]:
+    """
+    Devuelve los próximos partidos de toda la liga, del más cercano al más lejano.
+    No es una herramienta del modelo: la usa el flujo guiado /prode para armar
+    el teclado con los partidos que se pueden pronosticar.
+    """
+    clave = os.getenv("BSD_API_KEY")
+    if not clave:
+        raise RuntimeError("Falta configurar BSD_API_KEY en el .env")
+
+    async with httpx.AsyncClient(timeout=TIEMPO_ESPERA) as cliente_http:
+        respuesta = await cliente_http.get(
+            URL_BZZOIRO,
+            headers={"Authorization": f"Token {clave}"},
+            params={"league": ID_LIGA, "limit": 50},   # la primera página trae los más nuevos
+        )
+        respuesta.raise_for_status()
+        partidos = respuesta.json().get("results", [])
+
+    ahora = datetime.now(timezone.utc)
+    pendientes = sorted(
+        (p for p in partidos
+         if p["status"] not in ESTADOS_DESCARTADOS
+         and not p.get("replaced_by")
+         and datetime.fromisoformat(p["event_date"]) > ahora),   # todavía no empezó
+        key=lambda p: p["event_date"],
+    )[:cantidad]
+
+    resultado = []
+    for p in pendientes:
+        fecha = _fecha_argentina(p["event_date"])
+        resultado.append({
+            # Identificador del partido. Si la API no trajera id, se arma uno con los datos.
+            "id": str(p.get("id") or f"{p['home_team']}|{p['away_team']}|{p['event_date']}"),
+            "local": p["home_team"],
+            "visitante": p["away_team"],
+            "fecha": f"{DIAS[fecha.weekday()][:3]} {fecha:%d/%m %H:%M}",   # "sáb 22/11 19:00"
+        })
+    return resultado
+
+
 # ---------------------------------------------------------------------------
 # 3. Declaraciones
 # ---------------------------------------------------------------------------

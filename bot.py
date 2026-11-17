@@ -1,3 +1,12 @@
+"""
+ChiquiBot v6: bot de Telegram sobre la Liga Profesional de Fútbol Argentino.
+
+- Conversa con Gemini (Interactions API) con un prompt de sistema propio.
+- Recuerda la conversación de cada usuario en SQLite.
+- Consulta partidos reales con function calling (API de Bzzoiro).
+- v5: /opinion analiza opiniones con salida estructurada validada con Pydantic.
+- v6: flujo guiado /prode (ConversationHandler) y evaluación con evaluar.py.
+"""
 import json                                  # convierte los resultados de las funciones a texto JSON
 import logging
 import os
@@ -6,6 +15,7 @@ from dotenv import load_dotenv
 from google import genai                     # SDK oficial de Gemini
 from telegram import Update
 from telegram.constants import ChatAction    # acción "escribiendo..."
+from pydantic import ValidationError         # error de formato en la salida estructurada
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,7 +24,9 @@ from telegram.ext import (
     filters,
 )
 
-import db                                    # módulo propio: memoria en SQLite
+import db                                    # módulo propio: base de datos SQLite
+import pronosticos                           # flujo guiado del prode (v6)
+from analisis import analizar_opinion        # análisis con salida estructurada (v5)
 from herramientas import DECLARACIONES, ejecutar_funcion   # funciones propias del bot
 from prompts import PROMPT_SISTEMA           # personalidad de ChiquiBot
 
@@ -49,30 +61,40 @@ LIMITE_TELEGRAM = 4096
 cliente_gemini = genai.Client(api_key=GEMINI_API_KEY)
 
 
-def armar_entrada(historial: list[tuple[str, str]], mensaje_nuevo: str) -> list[dict]:
+def armar_entrada(historial: list[tuple[str, str]], contenido_nuevo: list[dict]) -> list[dict]:
     """
     Convierte el historial guardado en la lista de pasos que espera la
-    Interactions API y agrega al final el mensaje nuevo del usuario.
+    Interactions API y agrega al final el contenido nuevo del usuario.
+
+    contenido_nuevo es una lista de bloques (por ahora, solo de texto).
     """
     tipo_de_paso = {"user": "user_input", "model": "model_output"}
     pasos = [
         {"type": tipo_de_paso[rol], "content": [{"type": "text", "text": texto}]}
         for rol, texto in historial
     ]
-    pasos.append({"type": "user_input", "content": [{"type": "text", "text": mensaje_nuevo}]})
+    # contenido_nuevo ya es una lista de bloques: no se envuelve en otra lista.
+    pasos.append({"type": "user_input", "content": contenido_nuevo})
     return pasos
 
 
-async def consultar_gemini(historial: list[tuple[str, str]], mensaje: str) -> str:
+async def consultar_gemini(
+    historial: list[tuple[str, str]],
+    contenido_nuevo: list[dict],            # antes: mensaje: str
+    registro: list[str] | None = None,      # nuevo: lista opcional (la usa evaluar.py)
+) -> str:
     """
     Envía la conversación a Gemini y resuelve el ciclo de function calling:
     mientras el modelo pida funciones, se ejecutan y se le devuelven los
     resultados; cuando responde con texto, se devuelve ese texto.
+
+    Si se pasa una lista en `registro`, se agrega en ella el nombre de cada
+    función que pidió el modelo.
     """
     # Lista de pasos que se envía al modelo. Empieza con el historial y el
     # mensaje nuevo, y crece dentro de este turno con los pedidos de funciones
     # y sus resultados. Esos pasos intermedios no se guardan en la base.
-    entrada = armar_entrada(historial, mensaje)
+    entrada = armar_entrada(historial, contenido_nuevo)
 
     for vuelta in range(MAX_VUELTAS_HERRAMIENTAS):
         interaccion = await cliente_gemini.aio.interactions.create(
@@ -100,6 +122,8 @@ async def consultar_gemini(historial: list[tuple[str, str]], mensaje: str) -> st
         # Se ejecuta cada función pedida y se agrega su resultado como un paso
         # function_result. call_id debe coincidir con el id del pedido.
         for llamada in llamadas:
+            if registro is not None:            # solo si se pasó una lista
+                registro.append(llamada.name)   # anota la herramienta pedida
             resultado = await ejecutar_funcion(llamada.name, llamada.arguments)
             entrada.append({
                 "type": "function_result",
@@ -135,7 +159,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"¡Qué hacés, {nombre}! ⚽ Soy ChiquiBot, tu compañero para seguir "
         "la Liga Profesional de Fútbol Argentino.\n\n"
         "Preguntame cuándo juega tu equipo, cómo salió su último partido, "
-        "o charlemos de historia, ídolos y curiosidades del fútbol argentino.\n\n"
+        "o charlemos de historia, ídolos y curiosidades del fútbol argentino. "
+        "También podés jugar al prode con /prode y dejarme tu opinión con /opinion.\n\n"
         "Escribí /help para ver qué puedo hacer."
     )
 
@@ -145,7 +170,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Comandos disponibles:\n\n"
         "/start - Saludo inicial\n"
         "/help - Esta ayuda\n"
-        "/olvidar - Borra nuestra conversación y empezamos de cero\n\n"
+        "/olvidar - Borra nuestra conversación y empezamos de cero\n"
+        "/prode - Pronosticá un partido de la liga paso a paso\n"
+        "/cancelar - Cancela un prode en curso\n"
+        "/opinion <texto> - Dejá tu opinión de un partido o un equipo y la analizo\n"
+        "/opiniones - Resumen de las opiniones de los hinchas\n\n"
         "Y, sobre todo, podés escribirme lo que quieras saber sobre "
         "la Liga Profesional de Fútbol Argentino. Me acuerdo de lo que hablamos "
         "y puedo consultar los próximos partidos y los últimos resultados de cada equipo."
@@ -159,20 +188,83 @@ async def olvidar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Listo, empezamos de cero. ¿De qué querés que charlemos? ⚽")
 
 
-async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Responde con Gemini, teniendo en cuenta la conversación previa."""
-    user_id = update.effective_user.id
-    texto = update.message.text
-    logger.info("Mensaje de %s: %s", user_id, texto)
+EMOJI_SENTIMIENTO = {"positivo": "😀", "neutro": "😐", "negativo": "😠"}
 
+
+async def opinion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/opinion <texto>: analiza la opinión con salida estructurada y la guarda."""
+    # context.args es la lista de palabras escritas después del comando.
+    texto = " ".join(context.args).strip()
+    if not texto:
+        await update.message.reply_text(
+            "Escribí tu opinión después del comando. Por ejemplo:\n"
+            "/opinion Qué partidazo hizo Boca, el equipo jugó con una garra bárbara")
+        return
+
+    await update.message.chat.send_action(ChatAction.TYPING)
+    try:
+        analisis = await analizar_opinion(cliente_gemini, GEMINI_MODEL, texto)
+    except ValidationError as error:
+        # El modelo devolvió un JSON que no respeta el esquema: no se guarda nada.
+        logger.warning("La respuesta del análisis no respetó el esquema (%d errores)", error.error_count())
+        await update.message.reply_text("No pude analizar tu opinión. ¿La escribís de otra forma? 🙏")
+        return
+    except Exception as error:
+        logger.exception("Error al analizar la opinión")
+        await update.message.reply_text(describir_error(error))
+        return
+
+    numero = await db.guardar_opinion(update.effective_user.id, texto, analisis.sentimiento,
+                                      analisis.puntaje, analisis.equipo, analisis.resumen)
+    # El objeto validado se muestra en la terminal: es lo que se guardó en la base.
+    logger.info("Opinión %d guardada en la base: %s", numero, analisis.model_dump_json())
+
+    await update.message.reply_text(
+        f"¡Gracias por tu opinión! Así la entendí:\n\n"
+        f"Sentimiento: {analisis.sentimiento} {EMOJI_SENTIMIENTO[analisis.sentimiento]}\n"
+        f"Puntaje: {analisis.puntaje}/5\n"
+        f"Equipo: {analisis.equipo}\n"
+        f"Resumen: {analisis.resumen}\n\n"
+        f"Quedó guardada con el número {numero}. Mirá el resumen de todos con /opiniones."
+    )
+
+
+async def opiniones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/opiniones: resumen de las opiniones guardadas en la base."""
+    datos = await db.resumen_opiniones()
+    if not datos["total"]:
+        await update.message.reply_text("Todavía no hay opiniones. Dejá la primera con /opinion. ⚽")
+        return
+
+    s = datos["por_sentimiento"]
+    lineas = [
+        f"Opiniones de los hinchas: {datos['total']}",
+        f"😀 {s.get('positivo', 0)}   😐 {s.get('neutro', 0)}   😠 {s.get('negativo', 0)}",
+        f"Puntaje promedio: {datos['promedio']:.1f}/5",
+    ]
+    if datos["por_equipo"]:
+        lineas.append("\nEquipos más comentados:")
+        lineas += [f"- {equipo}: {cantidad} ({promedio:.1f}/5)"
+                   for equipo, cantidad, promedio in datos["por_equipo"]]
+    lineas.append("\nÚltimas opiniones:")
+    lineas += [f"{EMOJI_SENTIMIENTO[sent]} {resumen}" for sent, _, _, resumen in datos["ultimas"]]
+    await update.message.reply_text("\n".join(lineas))
+
+
+async def procesar_mensaje(update: Update, contenido: list[dict], texto_para_historial: str) -> None:
+    """
+    Pasos comunes a cualquier mensaje: recuperar el historial, consultar al
+    modelo, guardar el intercambio y responder.
+    """
+    user_id = update.effective_user.id
     await update.message.chat.send_action(ChatAction.TYPING)
 
     # Paso 1: recuperar lo que ya se habló con este usuario.
     historial = await db.obtener_historial(user_id, MAX_MENSAJES_HISTORIAL)
 
-    # Paso 2: consultar al modelo con el historial más el mensaje nuevo.
+    # Paso 2: consultar al modelo con el historial más el contenido nuevo.
     try:
-        respuesta = await consultar_gemini(historial, texto)
+        respuesta = await consultar_gemini(historial, contenido)
     except Exception as error:
         logger.exception("Error al consultar a Gemini")
         await update.message.reply_text(describir_error(error))
@@ -181,10 +273,20 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Paso 3: guardar la pregunta y la respuesta para la próxima consulta.
-    await db.guardar_intercambio(user_id, texto, respuesta)
+    await db.guardar_intercambio(user_id, texto_para_historial, respuesta)
 
+    # Paso 4: responder, en partes si supera el límite de Telegram.
     for inicio in range(0, len(respuesta), LIMITE_TELEGRAM):
         await update.message.reply_text(respuesta[inicio:inicio + LIMITE_TELEGRAM])
+
+
+async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Responde un mensaje de texto con Gemini, teniendo en cuenta la conversación previa."""
+    texto = update.message.text
+    logger.info("Mensaje de %s: %s", update.effective_user.id, texto)
+    # El texto se convierte en una lista con un solo bloque. En el historial
+    # se guarda el mismo texto.
+    await procesar_mensaje(update, [{"type": "text", "text": texto}], texto)
 
 
 async def manejar_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -210,15 +312,29 @@ def main() -> None:
     # post_init ejecuta al_iniciar dentro del bucle de eventos, antes del primer mensaje.
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(al_iniciar).build()
 
+    # bot_data es un diccionario compartido por todos los handlers. Ahí se dejan
+    # el cliente y el modelo para que pronosticos.py los use sin importar bot.py.
+    app.bot_data["cliente_gemini"] = cliente_gemini
+    app.bot_data["modelo"] = GEMINI_MODEL
+
+    # 1. El flujo guiado va PRIMERO: mientras un prode está en curso, sus handlers
+    #    deben recibir los mensajes antes que el handler general de texto.
+    app.add_handler(pronosticos.crear_manejador())
+    # 2. Comandos.
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("olvidar", olvidar))
+    app.add_handler(CommandHandler("opinion", opinion))
+    app.add_handler(CommandHandler("opiniones", opiniones))
+    # 3. Texto libre, al final porque acepta casi cualquier mensaje.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
     app.add_error_handler(manejar_error)
 
-    logger.info("ChiquiBot v4 en línea con el modelo %s.", GEMINI_MODEL)
+    logger.info("ChiquiBot v6 en línea con el modelo %s.", GEMINI_MODEL)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
+# Solo se arranca el bot si el archivo se ejecuta directamente (python bot.py),
+# no si otro archivo lo importa (como evaluar.py).
 if __name__ == "__main__":
     main()
