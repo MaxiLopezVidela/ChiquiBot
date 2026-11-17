@@ -11,6 +11,7 @@ Sistemas Inteligentes Aplicados · ITU UNCuyo · Grupo 4
 - Tiene una personalidad propia definida en el prompt de sistema (`prompts.py`): voseo, tono futbolero, respuestas breves en texto plano y sin inventar datos.
 - **Recuerda la conversación** de cada usuario en una base **SQLite**, incluso si el bot se reinicia.
 - Con `/olvidar`, cada usuario puede borrar su conversación.
+- **Consulta datos reales de la liga** con *function calling*: cuando le preguntan cuándo juega un equipo o cómo salió su último partido, Gemini pide la función `obtener_partidos`, el bot consulta la API de **Bzzoiro Sports Data** y el modelo responde con ese dato (fecha y hora argentina, rival, instancia, resultado).
 
 ## Estructura
 
@@ -19,6 +20,8 @@ Sistemas Inteligentes Aplicados · ITU UNCuyo · Grupo 4
 | `bot.py` | Bot principal: handlers de Telegram y consulta a Gemini |
 | `prompts.py` | Prompt de sistema (identidad, tarea, estilo, formato y honestidad) |
 | `db.py` | Memoria: guarda, lee y borra el historial en SQLite |
+| `herramientas.py` | Funciones propias: `obtener_partidos` (API de Bzzoiro), su declaración para el modelo y el despachador |
+| `prueba_herramientas.py` | Prueba aislada de las funciones, sin Telegram ni Gemini |
 | `requirements.txt` | Dependencias |
 | `.env.example` | Plantilla de variables de entorno |
 
@@ -47,7 +50,12 @@ Requiere Python 3.10 o superior.
    - `TELEGRAM_TOKEN`: token del bot, obtenido con @BotFather.
    - `GEMINI_API_KEY`: clave de Google AI Studio.
    - `GEMINI_MODEL`: modelo de Gemini (por defecto, `gemini-3.5-flash-lite`).
-5. Ejecutar el bot:
+   - `BSD_API_KEY`: clave gratuita de [Bzzoiro Sports Data](https://sports.bzzoiro.com/) (registrándose en el sitio).
+5. (Opcional) Probar la función sin Telegram:
+   ```
+   python prueba_herramientas.py
+   ```
+6. Ejecutar el bot:
    ```
    python bot.py
    ```
@@ -63,5 +71,5 @@ Requiere Python 3.10 o superior.
 
 ## Seguridad y privacidad
 
-- El `.env` (token y clave) y la base `chiquibot.db` **no se suben** al repositorio: están en el `.gitignore`.
+- El `.env` (token y claves) y la base `chiquibot.db` **no se suben** al repositorio: están en el `.gitignore`.
 - Mientras se use el plan gratuito de Gemini, no se deben enviar datos personales ni información sensible al bot.

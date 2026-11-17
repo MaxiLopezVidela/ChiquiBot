@@ -1,3 +1,4 @@
+import json                                  # convierte los resultados de las funciones a texto JSON
 import logging
 import os
 
@@ -14,6 +15,7 @@ from telegram.ext import (
 )
 
 import db                                    # módulo propio: memoria en SQLite
+from herramientas import DECLARACIONES, ejecutar_funcion   # funciones propias del bot
 from prompts import PROMPT_SISTEMA           # personalidad de ChiquiBot
 
 # ---------------------------------------------------------------------------
@@ -27,6 +29,10 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 # Mensajes anteriores que se envían en cada consulta
 # (20 = 10 preguntas y sus respuestas). Más memoria = consultas más lentas y más cuota.
 MAX_MENSAJES_HISTORIAL = 20
+
+# Cantidad máxima de vueltas del ciclo de function calling en un mismo mensaje.
+# Evita un bucle infinito si el modelo pidiera funciones una y otra vez.
+MAX_VUELTAS_HERRAMIENTAS = 5
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -58,14 +64,56 @@ def armar_entrada(historial: list[tuple[str, str]], mensaje_nuevo: str) -> list[
 
 
 async def consultar_gemini(historial: list[tuple[str, str]], mensaje: str) -> str:
-    """Envía a Gemini la conversación completa y devuelve el texto de la respuesta."""
-    interaccion = await cliente_gemini.aio.interactions.create(
-        model=GEMINI_MODEL,
-        system_instruction=PROMPT_SISTEMA,
-        input=armar_entrada(historial, mensaje),   # conversación completa
-        store=False,                               # la memoria la maneja el bot
-    )
-    return interaccion.output_text or "No se me ocurrió nada para responder 🤔"
+    """
+    Envía la conversación a Gemini y resuelve el ciclo de function calling:
+    mientras el modelo pida funciones, se ejecutan y se le devuelven los
+    resultados; cuando responde con texto, se devuelve ese texto.
+    """
+    # Lista de pasos que se envía al modelo. Empieza con el historial y el
+    # mensaje nuevo, y crece dentro de este turno con los pedidos de funciones
+    # y sus resultados. Esos pasos intermedios no se guardan en la base.
+    entrada = armar_entrada(historial, mensaje)
+
+    for vuelta in range(MAX_VUELTAS_HERRAMIENTAS):
+        interaccion = await cliente_gemini.aio.interactions.create(
+            model=GEMINI_MODEL,
+            system_instruction=PROMPT_SISTEMA,
+            input=entrada,
+            tools=DECLARACIONES,        # funciones que el modelo puede pedir
+            store=False,                # la memoria la maneja el bot
+        )
+
+        # Pasos de tipo function_call: el modelo pide ejecutar una función.
+        # Puede pedir más de una en la misma respuesta (por ejemplo, dos equipos).
+        llamadas = [paso for paso in interaccion.steps if paso.type == "function_call"]
+
+        if not llamadas:
+            # Sin pedidos de funciones: el modelo ya redactó la respuesta final.
+            return interaccion.output_text or "No se me ocurrió nada para responder 🤔"
+
+        # Se agregan a la entrada TODOS los pasos que devolvió el modelo, sin
+        # modificarlos (incluidos los de razonamiento interno). La API los
+        # necesita para relacionar cada resultado con su pedido.
+        for paso in interaccion.steps:
+            entrada.append(paso.model_dump())
+
+        # Se ejecuta cada función pedida y se agrega su resultado como un paso
+        # function_result. call_id debe coincidir con el id del pedido.
+        for llamada in llamadas:
+            resultado = await ejecutar_funcion(llamada.name, llamada.arguments)
+            entrada.append({
+                "type": "function_result",
+                "call_id": llamada.id,
+                "name": llamada.name,
+                # ensure_ascii=False conserva tildes y ñ
+                "result": [{"type": "text", "text": json.dumps(resultado, ensure_ascii=False)}],
+            })
+        # Se repite el ciclo: el modelo recibe los resultados y decide si
+        # necesita otra función o si ya puede responder.
+
+    # Se agotaron las vueltas sin respuesta final.
+    logger.warning("Se alcanzó el máximo de %d vueltas de herramientas", MAX_VUELTAS_HERRAMIENTAS)
+    return "No pude completar la consulta. ¿Me la preguntás de otra forma? 🙏"
 
 
 def describir_error(error: Exception) -> str:
@@ -86,8 +134,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"¡Qué hacés, {nombre}! ⚽ Soy ChiquiBot, tu compañero para seguir "
         "la Liga Profesional de Fútbol Argentino.\n\n"
-        "Preguntame lo que quieras sobre equipos, partidos, historia o "
-        "curiosidades del fútbol argentino.\n\n"
+        "Preguntame cuándo juega tu equipo, cómo salió su último partido, "
+        "o charlemos de historia, ídolos y curiosidades del fútbol argentino.\n\n"
         "Escribí /help para ver qué puedo hacer."
     )
 
@@ -99,7 +147,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/help - Esta ayuda\n"
         "/olvidar - Borra nuestra conversación y empezamos de cero\n\n"
         "Y, sobre todo, podés escribirme lo que quieras saber sobre "
-        "la Liga Profesional de Fútbol Argentino. Me acuerdo de lo que hablamos."
+        "la Liga Profesional de Fútbol Argentino. Me acuerdo de lo que hablamos "
+        "y puedo consultar los próximos partidos y los últimos resultados de cada equipo."
     )
 
 
@@ -167,7 +216,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
     app.add_error_handler(manejar_error)
 
-    logger.info("ChiquiBot v3 en línea con el modelo %s.", GEMINI_MODEL)
+    logger.info("ChiquiBot v4 en línea con el modelo %s.", GEMINI_MODEL)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
