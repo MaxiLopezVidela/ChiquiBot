@@ -6,3 +6,6 @@ __pycache__/
 
 # Resultados de la evaluación
 resultados_evaluacion.csv
+
+# Índice de datos de la evaluación (se regenera solo)
+indice_evaluacion.json

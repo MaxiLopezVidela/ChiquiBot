@@ -1,11 +1,13 @@
 """
-ChiquiBot v6: bot de Telegram sobre la Liga Profesional de Fútbol Argentino.
+ChiquiBot v7: bot de Telegram sobre la Liga Profesional de Fútbol Argentino.
 
 - Conversa con Gemini (Interactions API) con un prompt de sistema propio.
 - Recuerda la conversación de cada usuario en SQLite.
 - Consulta partidos reales con function calling (API de Bzzoiro).
 - v5: /opinion analiza opiniones con salida estructurada validada con Pydantic.
 - v6: flujo guiado /prode (ConversationHandler) y evaluación con evaluar.py.
+- v7: función propia 2, la tabla de posiciones (obtener_tabla), y evaluación con
+  índice de datos y juez que compara contra los datos reales.
 """
 import json                                  # convierte los resultados de las funciones a texto JSON
 import logging
@@ -27,7 +29,12 @@ from telegram.ext import (
 import db                                    # módulo propio: base de datos SQLite
 import pronosticos                           # flujo guiado del prode (v6)
 from analisis import analizar_opinion        # análisis con salida estructurada (v5)
-from herramientas import DECLARACIONES, ejecutar_funcion, proximos_partidos_liga   # funciones propias del bot
+from herramientas import (                   # funciones propias del bot
+    DECLARACIONES,
+    ejecutar_funcion,
+    obtener_tabla,
+    proximos_partidos_liga,
+)
 from prompts import PROMPT_SISTEMA           # personalidad de ChiquiBot
 
 # ---------------------------------------------------------------------------
@@ -81,7 +88,8 @@ def armar_entrada(historial: list[tuple[str, str]], contenido_nuevo: list[dict])
 async def consultar_gemini(
     historial: list[tuple[str, str]],
     contenido_nuevo: list[dict],            # antes: mensaje: str
-    registro: list[str] | None = None,      # nuevo: lista opcional (la usa evaluar.py)
+    registro: list[str] | None = None,      # lista opcional (la usa evaluar.py)
+    resultados: list[dict] | None = None,   # v7: lista opcional (la usa el juez de evaluar.py)
 ) -> str:
     """
     Envía la conversación a Gemini y resuelve el ciclo de function calling:
@@ -89,7 +97,8 @@ async def consultar_gemini(
     resultados; cuando responde con texto, se devuelve ese texto.
 
     Si se pasa una lista en `registro`, se agrega en ella el nombre de cada
-    función que pidió el modelo.
+    función que pidió el modelo. Si se pasa una lista en `resultados`, se agrega
+    lo que devolvió cada función, para que el juez pueda comparar con esos datos.
     """
     # Lista de pasos que se envía al modelo. Empieza con el historial y el
     # mensaje nuevo, y crece dentro de este turno con los pedidos de funciones
@@ -125,6 +134,10 @@ async def consultar_gemini(
             if registro is not None:            # solo si se pasó una lista
                 registro.append(llamada.name)   # anota la herramienta pedida
             resultado = await ejecutar_funcion(llamada.name, llamada.arguments)
+            if resultados is not None:          # solo si se pasó una lista
+                resultados.append({"herramienta": llamada.name,
+                                   "argumentos": llamada.arguments,
+                                   "resultado": resultado})
             entrada.append({
                 "type": "function_result",
                 "call_id": llamada.id,
@@ -159,6 +172,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"¡Qué hacés, {nombre}! ⚽ Soy ChiquiBot, tu compañero para seguir "
         "la Liga Profesional de Fútbol Argentino.\n\n"
         "Preguntame cuándo juega tu equipo, cómo salió su último partido, "
+        "cómo está la tabla de posiciones, "
         "o charlemos de historia, ídolos y curiosidades del fútbol argentino. "
         "También podés jugar al prode con /prode y dejarme tu opinión con /opinion.\n\n"
         "Escribí /help para ver qué puedo hacer."
@@ -177,7 +191,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/opiniones - Resumen de las opiniones de los hinchas\n\n"
         "Y, sobre todo, podés escribirme lo que quieras saber sobre "
         "la Liga Profesional de Fútbol Argentino. Me acuerdo de lo que hablamos "
-        "y puedo consultar los próximos partidos y los últimos resultados de cada equipo."
+        "y puedo consultar los próximos partidos y los últimos resultados de cada equipo, "
+        "y la tabla de posiciones."
     )
 
 
@@ -300,13 +315,18 @@ async def al_iniciar(app: Application) -> None:
     """Se ejecuta una vez, antes de recibir mensajes: crea la base si no existe."""
     await db.inicializar()
     logger.info("Base de datos lista (%s).", db.RUTA_DB)
-    # Precarga los partidos de la liga: quedan guardados 5 minutos, así las
-    # primeras consultas (fixture, resultados, /prode) no esperan a la API.
+    # Precarga los partidos y la tabla de la liga: quedan guardados unos minutos,
+    # así las primeras consultas (fixture, resultados, tabla, /prode) no esperan a la API.
     try:
         partidos = await proximos_partidos_liga()
         logger.info("Partidos precargados (%d próximos).", len(partidos))
     except Exception as error:
         logger.warning("No se pudieron precargar los partidos: %s", type(error).__name__)
+    try:
+        tabla = await obtener_tabla()
+        logger.info("Tabla precargada (%d zonas).", len(tabla.get("zonas", [])))
+    except Exception as error:
+        logger.warning("No se pudo precargar la tabla: %s", type(error).__name__)
 
 
 def main() -> None:
@@ -337,7 +357,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
     app.add_error_handler(manejar_error)
 
-    logger.info("ChiquiBot v6 en línea con el modelo %s.", GEMINI_MODEL)
+    logger.info("ChiquiBot v7 en línea con el modelo %s.", GEMINI_MODEL)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
