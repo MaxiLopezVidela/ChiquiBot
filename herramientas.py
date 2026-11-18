@@ -10,7 +10,8 @@ El módulo tiene tres partes:
 
 import logging                                   # registro de eventos en la terminal
 import os                                        # para leer la clave de la API del .env
-from datetime import datetime, timedelta, timezone
+import time                                      # para saber cuánto hace que se guardó una página
+from datetime import date, datetime, timedelta, timezone
 
 import httpx                                     # cliente HTTP asíncrono (dependencia de python-telegram-bot)
 
@@ -22,8 +23,10 @@ logger = logging.getLogger("chiquibot")          # mismo registrador que bot.py
 
 URL_BZZOIRO = "https://sports.bzzoiro.com/api/v2/events/"
 ID_LIGA = 85                     # Liga Profesional de Fútbol (Argentina) en Bzzoiro
-TIEMPO_ESPERA = 10               # segundos máximos de espera por consulta
-PAGINAS_MAXIMAS = 3              # cada página trae 50 partidos, del más nuevo al más viejo
+TIEMPO_ESPERA = 20               # segundos máximos de espera por consulta (la API a veces tarda)
+CACHE_SEGUNDOS = 300             # cada consulta a la API se reutiliza durante 5 minutos
+DIAS_PROXIMOS = 14               # los próximos partidos se buscan de hoy a 14 días
+SEMANAS_ATRAS = 6                # los últimos resultados se buscan hasta 6 semanas atrás
 
 # La API devuelve las fechas en UTC; Argentina está en UTC-3 todo el año.
 HORA_ARGENTINA = timezone(timedelta(hours=-3))
@@ -54,6 +57,57 @@ INSTANCIAS = {
 
 # Estados de la API que no corresponden a un partido por jugarse.
 ESTADOS_DESCARTADOS = {"finished", "postponed", "canceled", "cancelled"}
+
+
+# Consultas ya hechas: (desde, hasta) -> (momento de la consulta, partidos).
+# Evita pedirle lo mismo a la API en cada mensaje: los partidos no cambian minuto a minuto.
+_cache: dict[tuple[date, date], tuple[float, list[dict]]] = {}
+
+
+def _hoy() -> date:
+    """Fecha de hoy en Argentina."""
+    return datetime.now(HORA_ARGENTINA).date()
+
+
+async def _partidos_entre(cliente_http: httpx.AsyncClient, desde: date, hasta: date) -> list[dict]:
+    """
+    Devuelve los partidos de la liga entre dos fechas.
+
+    Se consulta por rango de fechas y no "los últimos 50 partidos": cuando la API
+    está cargada, una consulta de 50 partidos tardaba más de un minuto, mientras
+    que una de una semana (unos 15 partidos) responde en pocos segundos.
+    Si el rango se consultó hace menos de 5 minutos, se reutiliza. Si la API
+    tarda demasiado, se reintenta una vez antes de dar el error.
+    """
+    guardado = _cache.get((desde, hasta))
+    if guardado and time.monotonic() - guardado[0] < CACHE_SEGUNDOS:
+        return guardado[1]
+
+    clave = os.getenv("BSD_API_KEY")
+    for intento in (1, 2):
+        try:
+            respuesta = await cliente_http.get(
+                URL_BZZOIRO,
+                headers={"Authorization": f"Token {clave}"},
+                params={"league": ID_LIGA, "date_from": desde.isoformat(),
+                        "date_to": hasta.isoformat(), "limit": 50},
+            )
+            respuesta.raise_for_status()             # un 4xx o 5xx se convierte en excepción
+            break
+        except httpx.TimeoutException:
+            if intento == 2:
+                raise                                # segundo intento fallido: se informa el error
+            logger.warning("La API de partidos tardó demasiado; reintento")
+
+    partidos = respuesta.json().get("results", [])
+    _cache[(desde, hasta)] = (time.monotonic(), partidos)
+    return partidos
+
+
+async def _proximos_de_la_liga(cliente_http: httpx.AsyncClient) -> list[dict]:
+    """Partidos de hoy a DIAS_PROXIMOS días. Una sola consulta, compartida por la función y el /prode."""
+    hoy = _hoy()
+    return await _partidos_entre(cliente_http, hoy, hoy + timedelta(days=DIAS_PROXIMOS))
 
 
 def _fecha_argentina(fecha_iso: str) -> datetime:
@@ -92,32 +146,30 @@ async def obtener_partidos(equipo: str, tipo: str = "proximos", cantidad: int = 
         return {"error": f"Tipo inválido: {tipo}. Usá 'proximos' o 'ultimos'."}
     cantidad = max(1, min(int(cantidad), 5))         # se acota entre 1 y 5
 
-    clave = os.getenv("BSD_API_KEY")
-    if not clave:
+    if not os.getenv("BSD_API_KEY"):
         return {"error": "Falta configurar BSD_API_KEY en el .env"}
-    encabezados = {"Authorization": f"Token {clave}"}
 
-    # La API devuelve los partidos de la liga del más nuevo al más viejo, de a 50.
-    # Se recorren hasta tres páginas (unas diez fechas) buscando los del equipo.
-    del_equipo = []
+    def es_del_equipo(p: dict) -> bool:
+        return equipo in (p["home_team"], p["away_team"])
+
     async with httpx.AsyncClient(timeout=TIEMPO_ESPERA) as cliente_http:
-        for pagina in range(PAGINAS_MAXIMAS):
-            respuesta = await cliente_http.get(
-                URL_BZZOIRO,
-                headers=encabezados,
-                params={"league": ID_LIGA, "limit": 50, "offset": pagina * 50},
-            )
-            respuesta.raise_for_status()             # un 4xx o 5xx se convierte en excepción
-            partidos = respuesta.json().get("results", [])
-            del_equipo += [p for p in partidos if equipo in (p["home_team"], p["away_team"])]
-
-            terminados = [p for p in del_equipo if p["status"] == "finished"]
-            if tipo == "ultimos" and len(terminados) >= cantidad:
-                break                                # ya hay suficientes resultados
-            if tipo == "proximos" and terminados:
-                break                                # los próximos están antes del último jugado
-            if not partidos:
-                break                                # no hay más páginas
+        if tipo == "proximos":
+            del_equipo = [p for p in await _proximos_de_la_liga(cliente_http) if es_del_equipo(p)]
+        else:
+            # Se recorre de a una semana hacia atrás hasta juntar los resultados pedidos.
+            # Cada semana se superpone un día con la anterior (la API usa fechas en UTC),
+            # y los partidos repetidos se descartan por su id.
+            por_id = {}
+            hoy = _hoy()
+            for semana in range(1, SEMANAS_ATRAS + 1):
+                desde = hoy - timedelta(days=7 * semana)
+                for p in await _partidos_entre(cliente_http, desde, desde + timedelta(days=7)):
+                    if es_del_equipo(p):
+                        por_id[p.get("id") or p["event_date"]] = p
+                terminados = [p for p in por_id.values() if p["status"] == "finished"]
+                if len(terminados) >= cantidad:
+                    break                            # ya hay suficientes resultados
+            del_equipo = list(por_id.values())
 
     if tipo == "ultimos":
         jugados = sorted(
@@ -175,18 +227,11 @@ async def proximos_partidos_liga(cantidad: int = 8) -> list[dict]:
     No es una herramienta del modelo: la usa el flujo guiado /prode para armar
     el teclado con los partidos que se pueden pronosticar.
     """
-    clave = os.getenv("BSD_API_KEY")
-    if not clave:
+    if not os.getenv("BSD_API_KEY"):
         raise RuntimeError("Falta configurar BSD_API_KEY en el .env")
 
     async with httpx.AsyncClient(timeout=TIEMPO_ESPERA) as cliente_http:
-        respuesta = await cliente_http.get(
-            URL_BZZOIRO,
-            headers={"Authorization": f"Token {clave}"},
-            params={"league": ID_LIGA, "limit": 50},   # la primera página trae los más nuevos
-        )
-        respuesta.raise_for_status()
-        partidos = respuesta.json().get("results", [])
+        partidos = await _proximos_de_la_liga(cliente_http)
 
     ahora = datetime.now(timezone.utc)
     pendientes = sorted(
