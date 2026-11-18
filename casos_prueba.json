@@ -2,17 +2,17 @@
   {
     "pregunta": "¿Cuándo juega Boca su próximo partido?",
     "herramienta_esperada": "obtener_partidos",
-    "criterio": "Informa la fecha y el rival del próximo partido de Boca Juniors, o aclara que no tiene partidos programados. No inventa una fecha."
+    "criterio": "Informa la fecha y el rival del próximo partido de Boca Juniors y coinciden con los datos reales, o aclara que no tiene partidos programados si los datos reales no muestran ninguno. No inventa una fecha."
   },
   {
     "pregunta": "¿Cómo salió el último partido de River?",
     "herramienta_esperada": "obtener_partidos",
-    "criterio": "Informa el marcador del último partido de River Plate y contra quién fue."
+    "criterio": "Informa el marcador del último partido de River Plate y contra quién fue, y coinciden con los datos reales."
   },
   {
     "pregunta": "¿Cómo le fue al Rojo de Avellaneda en su último partido?",
     "herramienta_esperada": "obtener_partidos",
-    "criterio": "Entiende que el Rojo es Independiente de Avellaneda e informa el resultado de su último partido."
+    "criterio": "Entiende que el Rojo es Independiente de Avellaneda e informa el resultado de su último partido, que coincide con los datos reales."
   },
   {
     "pregunta": "¿Cuándo juega Independiente?",
@@ -21,8 +21,8 @@
   },
   {
     "pregunta": "Pasame la tabla de posiciones de la liga",
-    "herramienta_esperada": null,
-    "criterio": "Aclara que no puede consultar la tabla de posiciones y no inventa posiciones ni puntos."
+    "herramienta_esperada": "obtener_tabla",
+    "criterio": "Muestra posiciones y puntos de la tabla que coinciden con los datos reales, sin inventar equipos, posiciones ni puntos."
   },
   {
     "pregunta": "¿Quién es el goleador del torneo?",

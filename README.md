@@ -12,9 +12,10 @@ Sistemas Inteligentes Aplicados · ITU UNCuyo · Grupo 4
 - **Recuerda la conversación** de cada usuario en una base **SQLite**, incluso si el bot se reinicia.
 - Con `/olvidar`, cada usuario puede borrar su conversación.
 - **Consulta datos reales de la liga** con *function calling*: cuando le preguntan cuándo juega un equipo o cómo salió su último partido, Gemini pide la función `obtener_partidos`, el bot consulta la API de **Bzzoiro Sports Data** y el modelo responde con ese dato (fecha y hora argentina, rival, instancia, resultado).
+- **Muestra la tabla de posiciones** (v7): cuando le preguntan por la tabla, en qué puesto está un equipo o cuántos puntos tiene, Gemini pide la función `obtener_tabla`, que consulta la tabla de la temporada actual en la API de Bzzoiro (`/leagues/85/standings/`) y la devuelve separada por zona.
 - **Analiza opiniones con salida estructurada** (`/opinion`): el modelo devuelve un JSON con sentimiento, puntaje de 1 a 5, equipo y resumen; **Pydantic** lo valida y se guarda en SQLite. `/opiniones` muestra el resumen de todas.
 - **Flujo guiado** (`/prode`): un `ConversationHandler` conduce el pronóstico de un partido real paso a paso (partido → resultado → confirmación). La IA interpreta el resultado escrito como quieras ("gana Boca 2 a 1") y el pronóstico se guarda en SQLite. Con `/cancelar` se interrumpe en cualquier paso.
-- **Evaluación** (`evaluar.py`): 10 casos de prueba propios que verifican si el modelo usa la herramienta correcta y si la respuesta cumple un criterio, con otro modelo como juez.
+- **Evaluación** (`evaluar.py`): 10 casos de prueba propios que verifican si el modelo usa la herramienta correcta y si la respuesta cumple un criterio, con otro modelo como juez. Desde la v7, el juez compara la respuesta con los datos reales (RAG) y los datos de la API se consultan una sola vez y se guardan en un índice.
 
 ## Estructura
 
@@ -23,10 +24,10 @@ Sistemas Inteligentes Aplicados · ITU UNCuyo · Grupo 4
 | `bot.py` | Bot principal: handlers de Telegram y consulta a Gemini |
 | `prompts.py` | Prompt de sistema (identidad, tarea, estilo, formato y honestidad) |
 | `db.py` | Memoria: guarda, lee y borra el historial en SQLite |
-| `herramientas.py` | Funciones propias: `obtener_partidos` (API de Bzzoiro), su declaración para el modelo y el despachador. También `proximos_partidos_liga`, que usa el prode |
+| `herramientas.py` | Funciones propias: `obtener_partidos` y `obtener_tabla` (API de Bzzoiro), sus declaraciones para el modelo y el despachador. También `proximos_partidos_liga`, que usa el prode, y la precarga de datos que usa la evaluación |
 | `analisis.py` | Análisis de opiniones con salida estructurada (esquema Pydantic) |
 | `pronosticos.py` | Flujo guiado `/prode` con `ConversationHandler` |
-| `evaluar.py` | Evaluación automática del bot |
+| `evaluar.py` | Evaluación automática del bot, con índice de datos y juez con datos reales |
 | `casos_prueba.json` | Los 10 casos de prueba de la evaluación |
 | `prueba_herramientas.py` | Prueba aislada de las funciones, sin Telegram ni Gemini |
 | `requirements.txt` | Dependencias |
@@ -66,6 +67,9 @@ Requiere Python 3.10 o superior.
    ```
    python evaluar.py
    ```
+   La primera vez arma `indice_evaluacion.json` con los datos de la API y lo reutiliza durante 30 minutos. Opciones:
+   - `python evaluar.py --nuevo`: vuelve a consultar la API aunque el índice esté vigente.
+   - `python evaluar.py --repeticiones 3`: ejecuta cada caso 3 veces y muestra cuántas veces aprobó cada uno.
 7. Ejecutar el bot:
    ```
    python bot.py
@@ -86,7 +90,7 @@ Requiere Python 3.10 o superior.
 
 ## Seguridad y privacidad
 
-- El `.env` (token y claves), la base `chiquibot.db` y el reporte `resultados_evaluacion.csv` **no se suben** al repositorio: están en el `.gitignore`.
+- El `.env` (token y claves), la base `chiquibot.db`, el reporte `resultados_evaluacion.csv` y el índice `indice_evaluacion.json` **no se suben** al repositorio: están en el `.gitignore`.
 - Mientras se use el plan gratuito de Gemini, no se deben enviar datos personales ni información sensible al bot.
 ## Dificultades y decisiones
 
@@ -116,9 +120,37 @@ Medimos los tiempos con un script aparte (`medir_api.py`, que no forma parte del
 - Cada consulta se **guarda 5 minutos** (caché en memoria): los partidos no cambian minuto a minuto y así se evita repetir consultas.
 - Al arrancar, el bot **precarga** los próximos partidos.
 
-### El juez de la evaluación no ve los datos de la API
+### El juez de la evaluación no veía los datos de la API (resuelto en la v7)
 
-En la evaluación (`evaluar.py`), los casos 1 y 3 salieron con ✘ en contenido aunque el bot respondió bien: la fecha y el rival coincidían con lo que devuelve la API. El modelo juez no recibe el resultado de la herramienta ni la fecha de hoy, así que una fecha de 2026 le parece inventada. También pasó lo contrario: en el caso 7 aprobó una respuesta que nombraba al goleador de 1967, algo que el prompt prohíbe. **Pendiente para la entrega final:** pasarle al juez la fecha actual y el resultado de la herramienta, y revisar a mano los casos que juzga.
+En la evaluación del Hito 4, los casos 1 y 3 salieron con ✘ en contenido aunque el bot respondió bien: la fecha y el rival coincidían con lo que devuelve la API. El modelo juez no recibía el resultado de la herramienta ni la fecha de hoy, así que una fecha de 2026 le parecía inventada (un **falso negativo**). También pasó lo contrario: en el caso 7 aprobó una respuesta que nombraba al goleador de 1967, algo que el prompt prohíbe.
+
+**Cambios en `evaluar.py` (v7):**
+- **Fecha de comparación:** el juez recibe la fecha y la hora de Argentina del momento en que se consultaron los datos, y la regla de que un partido posterior a esa fecha es futuro, no inventado.
+- **Resultados de las herramientas:** `consultar_gemini` (en `bot.py`) acepta una lista `resultados` donde anota lo que devolvió cada función. El juez recibe esos datos, los mismos que vio el bot.
+- **Índice y RAG:** antes de los casos, `evaluar.py` consulta una sola vez a la API los próximos partidos, los resultados de las últimas 6 semanas y la tabla (`herramientas.precargar_datos`), y arma un índice por equipo que guarda en `indice_evaluacion.json`. Para cada caso **recupera** del índice los datos de los equipos mencionados en la pregunta o la respuesta (por nombre o apodo: "el Rojo", "el Xeneize") y la tabla si se habla de posiciones, y los **agrega** a la consulta del juez, que **genera** su veredicto comparando con datos reales. Sirve también cuando el bot no usó la herramienta: el juez igual tiene el dato correcto para comparar.
+- **Más rápida:** mientras el índice está vigente (30 minutos), las herramientas del bot toman los datos de la caché en lugar de esperar a la API. En la primera corrida se hacen 9 consultas a la API; en las siguientes, ninguna. El reporte muestra los segundos de cada caso y qué datos se recuperaron.
+- **Regla para el caso 7:** si el criterio pide no dar el nombre de un jugador, cualquier nombre en la respuesta lo incumple, aunque después aclare que no está confirmado.
+
+### Los resultados cambian entre corridas (v7)
+
+Corriendo `evaluar.py` varias veces sin cambiar nada, el resultado variaba (9/10 en una corrida, 10/10 en otra). Los dos modelos, el bot y el juez, eligen cada palabra con algo de azar (la *temperatura*), así que una sola corrida no alcanza para medir.
+
+- **Juez con temperatura 0:** así da (casi siempre) el mismo veredicto ante la misma respuesta. Al bot no se le cambia: se lo evalúa tal como responde a los usuarios.
+- **`--repeticiones N`:** cada caso se ejecuta N veces y se informa su tasa de aciertos. Un caso que a veces aprueba y a veces no se marca como INESTABLE.
+
+Con 3 repeticiones (18/11/2026) medimos el bot, ajustamos el prompt y volvimos a medir:
+
+| Corrida | Herramienta | Criterio | Casos con fallas |
+|---|---|---|---|
+| Antes de los ajustes | 27/30 (90 %) | 26/30 (87 %) | 4: no preguntaba cuál Independiente (0/3). 7: nombraba al goleador de 1967 con una aclaración (2/3) |
+| Ajuste 1: ejemplo de nombre ambiguo en el prompt y en la descripción de `obtener_partidos`, y regla de no dar nombres ni con aclaraciones | 30/30 (100 %) | 28/30 (93 %) | 8: empezó a preguntar "¿cuál Independiente?" también en una pregunta de historia (1/3) |
+| Ajuste 2: la pregunta de cuál equipo es solo para partidos y tabla | 30/30 (100 %) | 30/30 (100 %) | Ninguno |
+
+El ajuste 1 arregló dos casos y rompió otro, y la evaluación lo detectó enseguida: para eso sirve tenerla automatizada.
+
+### La tabla suma el Apertura y el Clausura
+
+La API devuelve la tabla separada por zona ("Clausura, Zona A" y "Clausura, Zona B"), pero cada equipo tiene 32 partidos jugados: suma los dos torneos del año. Es la tabla acumulada del año, separada por zona, no la del Clausura solo.
 
 ### Alucinaciones en datos históricos
 
