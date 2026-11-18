@@ -27,7 +27,7 @@ from telegram.ext import (
 import db                                    # módulo propio: base de datos SQLite
 import pronosticos                           # flujo guiado del prode (v6)
 from analisis import analizar_opinion        # análisis con salida estructurada (v5)
-from herramientas import DECLARACIONES, ejecutar_funcion   # funciones propias del bot
+from herramientas import DECLARACIONES, ejecutar_funcion, proximos_partidos_liga   # funciones propias del bot
 from prompts import PROMPT_SISTEMA           # personalidad de ChiquiBot
 
 # ---------------------------------------------------------------------------
@@ -300,6 +300,13 @@ async def al_iniciar(app: Application) -> None:
     """Se ejecuta una vez, antes de recibir mensajes: crea la base si no existe."""
     await db.inicializar()
     logger.info("Base de datos lista (%s).", db.RUTA_DB)
+    # Precarga los partidos de la liga: quedan guardados 5 minutos, así las
+    # primeras consultas (fixture, resultados, /prode) no esperan a la API.
+    try:
+        partidos = await proximos_partidos_liga()
+        logger.info("Partidos precargados (%d próximos).", len(partidos))
+    except Exception as error:
+        logger.warning("No se pudieron precargar los partidos: %s", type(error).__name__)
 
 
 def main() -> None:

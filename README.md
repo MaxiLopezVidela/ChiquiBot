@@ -88,3 +88,38 @@ Requiere Python 3.10 o superior.
 
 - El `.env` (token y claves), la base `chiquibot.db` y el reporte `resultados_evaluacion.csv` **no se suben** al repositorio: están en el `.gitignore`.
 - Mientras se use el plan gratuito de Gemini, no se deben enviar datos personales ni información sensible al bot.
+## Dificultades y decisiones
+
+### La API de partidos se satura en horario pico (17/11/2026)
+
+En el ensayo del video del Hito 4 (15:37), la API de Bzzoiro no respondió dentro de los 10 segundos de espera (`httpx.ReadTimeout`) en la función propia, en el `/prode` y en tres casos de la evaluación. **El bot no se cayó**: avisó al usuario que no pudo consultar el dato y siguió funcionando. Pero sin datos no se podía mostrar la función ni el flujo guiado.
+
+Medimos los tiempos con un script aparte (`medir_api.py`, que no forma parte del repositorio):
+
+| Hora | Consulta | Resultado |
+|---|---|---|
+| 15:54 | Página principal de Bzzoiro | 23,7 s |
+| 15:54 | API, 5 partidos | 8,1 s |
+| 15:54 | API, 50 partidos (lo que pedía el bot) | más de 60 s ❌ |
+| 16:02 | Partidos de los próximos 10 días | 9,4 s, 9 partidos ✅ |
+| 16:02 | Partidos de los últimos 14 días | más de 60 s ❌ |
+| 16:15 | Últimos 14 días, máximo 10 | más de 60 s ❌ |
+| 16:15 | Solo una semana (5 al 9/11) | 1,1 s, 15 partidos ✅ |
+| 20:40 | Semana del 10 al 17/11 | 1,1 s, 0 partidos (semana sin fecha) |
+| 20:40 | Semanas del 5 al 9/11 y del 29/10 al 4/11 | 1,0 s y 2,3 s, 15 partidos cada una ✅ |
+
+**Conclusión:** el tiempo de respuesta de la API **depende del horario**. Las mismas consultas tardaron más de 60 s a la tarde y 1 o 2 s a la noche, y a la tarde hasta la página web de Bzzoiro tardaba 24 s, sin relación con nuestro bot. Todo indica que la API se satura con el tráfico en horario pico (a esa hora había partidos en vivo de varias ligas), aunque no lo podemos confirmar porque no vemos sus servidores. Cuando está saturada, las consultas grandes son las primeras en fallar. Por eso el bot no puede controlar cuánto tarda la API, pero sí cuánto le pide y qué hace si no responde.
+
+**Cambios en `herramientas.py`:**
+- Se consulta **por rango de fechas** (`date_from` / `date_to`) y no "los últimos 50 partidos". Los próximos partidos salen de una sola consulta (de hoy a 14 días), compartida por la función propia y el `/prode`. Los últimos resultados se buscan **de a una semana hacia atrás**, hasta encontrar los del equipo (máximo 6 semanas).
+- La espera por consulta pasó de 10 a **20 segundos**, con **un reintento** si la API no responde.
+- Cada consulta se **guarda 5 minutos** (caché en memoria): los partidos no cambian minuto a minuto y así se evita repetir consultas.
+- Al arrancar, el bot **precarga** los próximos partidos.
+
+### El juez de la evaluación no ve los datos de la API
+
+En la evaluación (`evaluar.py`), los casos 1 y 3 salieron con ✘ en contenido aunque el bot respondió bien: la fecha y el rival coincidían con lo que devuelve la API. El modelo juez no recibe el resultado de la herramienta ni la fecha de hoy, así que una fecha de 2026 le parece inventada. También pasó lo contrario: en el caso 7 aprobó una respuesta que nombraba al goleador de 1967, algo que el prompt prohíbe. **Pendiente para la entrega final:** pasarle al juez la fecha actual y el resultado de la herramienta, y revisar a mano los casos que juzga.
+
+### Alucinaciones en datos históricos
+
+Desde el Hito 2, el modelo tiende a inventar goleadores y resultados de partidos viejos. Se redujo con reglas de honestidad en el prompt, pero no se elimina del todo (ver el caso 7 de la evaluación).
